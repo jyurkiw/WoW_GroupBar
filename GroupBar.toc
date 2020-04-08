@@ -1,0 +1,4 @@
+## Interface: 80300
+## Title: GroupBar
+embeds.xml
+core.lua
