@@ -7,7 +7,6 @@ debug=1
 local GroupBarRoster = {}
 -- local healthTimer = nil
 healthTimer = nil
-local basicUi = nil
 
 function GroupBarAddon:OnInitialize()
   self:CreateReloadButton()
@@ -26,6 +25,11 @@ end
 
 function GroupBarAddon:OnEnable()
   self:Print("GroupBar:Begin Enable")
+  if IsInGroup()
+  then
+    self:BuildRaidRoster()
+    self:DisplayBarUI()
+  end
   self:Print("GroupBar:End Enable")
 end
 
@@ -46,96 +50,174 @@ function GroupBarAddon:BuildRaidRoster()
     return nil
   end
   self:Print("Building Raid Roster")
-  local unitIdBase = IsInRaid() and "raid" or "party"
   local unitId = nil
+  local isRaid = IsInRaid()
+  local nameInfo = {}
+  local maxIdx = isRaid and 40 or 4
+  local baseUnitId = isRaid and "raid" or "party"
 
-  for raidIndex=1, 40, 1
+  -- for raid
+  self:Print(maxIdx, baseUnitId)
+  for raidIndex=1,maxIdx,1
   do
-    name, rank, subgroup, level, class, fileName,
-      zone, online, isDead, combatRole, isML = GetRaidRosterInfo(raidIndex)
-    self:Print(name, rank, subgroup, level, class, fileName, zone, online, isDead, combatRole, isML)
-    if name == nil then break end
-
-    -- If a character is a low enough level, combatRole can be nil. Set to none
-    if combatRole == nil then combatRole = "NONE" end
-
-    unitId = unitIdBase..raidIndex
-    table.insert(GroupBarRoster, {name, class, combatRole})
+    local unitId = baseUnitId..raidIndex
+    if UnitExists(unitId)
+    then
+      local name, server = UnitName(unitId)
+      nameInfo[name] = unitId
+    end
   end
 
-  if healthTimer == nil then healthTimer = self:ScheduleRepeatingTimer("HealthTimerHandler", 5) end
+  if not isRaid
+  then
+    -- for player
+    local name, server = UnitName("player")
+    nameInfo[name] = "player"
+  end
+
+  for raidIndex=1,maxIdx,1
+  do
+    name, rank, subgroup, level, class, fileName,
+      zone, online, isDead, data, isML, combatRole = GetRaidRosterInfo(raidIndex)
+    if name ~= nil
+    then
+      self:Print(name, rank, subgroup, level, class, fileName, zone, online, isDead, data, isML, combatRole)
+
+      -- If a character is a low enough level, combatRole can be nil. Set to none
+      if combatRole == nil then combatRole = "NONE"; self:Print("role to none for "..name) end
+
+      table.insert(GroupBarRoster, {name, class, combatRole, nameInfo[name]})
+    end
+  end
+
+  if healthTimer == nil then healthTimer = self:ScheduleRepeatingTimer("HealthTimerHandler", 0.2) end
   self:Print("Done building raid roster")
 end
 
-function GroupBarAddon:UpdateRaidHealth()
-  self:Print("Getting raid health")
-  health, maxHealth = 0, 0
+-- debug function hooks for UpdateRaidHealth()
+gb_UnitHealth = UnitHealth
+gb_UnitHealthMax = UnitHealthMax
+gb_UnitIsDead = UnitIsDead
+-- end debug function hooks for UpdateRaidHealth()
 
-  for k,member in pairs(GroupBarRoster)
-  do
-    self:Print("===================")
-    name, class, combatRole = unpack(member)
-    self:Print(name, class, combatRole)
-    self:Print("===================")
-  end
+function GroupBarAddon:UpdateRaidHealth()
+  health, currentMaxHealth, totalMaxHealth = 0, 0, 0
 
   -- Loop through possible party/raid members
   -- Will probably need a local table keyed to names
-  local nameRoleRoster = {}
-  local rosterCount = 0
-  for k,member in pairs(GroupBarRoster)
+  local roster = {}
+
+  for idx,member in pairs(GroupBarRoster)
   do
-    name, class, combatRole = unpack(member)
-    nameRoleRoster[name] = {class=class, role=combatRole}
-    rosterCount = rosterCount + 1
+    name, class, combatRole, unitId = unpack(member)
+    health = health + gb_UnitHealth(unitId)
+    local maxHealth = gb_UnitHealthMax(unitId)
+    currentMaxHealth = currentMaxHealth + (gb_UnitIsDead(unitId) and 0 or maxHealth)
+    totalMaxHealth = totalMaxHealth + maxHealth
   end
 
-  if IsInRaid()
-  then
-    for i=1,rosterCount,1
-    do
-      health = health + UnitHealth("raid"..i)
-      maxHealth = maxHealth + UnitHealthMax("raid"..i)
-      -- name, realm = UnitName("raid"..i)
-      -- class, role = unpack(nameRoleRoster[name])
-    end
-  else
-    for i=1,rosterCount-1,1
-    do
-      health = health + UnitHealth("party"..i)
-      maxHealth = maxHealth + UnitHealthMax("party"..i)
-      -- name, realm = UnitName("party"..i)
-      -- class, role = unpack(nameRoleRoster[name])
-    end
-    health = health + UnitHealth("player")
-    maxHealth = maxHealth + UnitHealthMax("player")
-    -- name, realm = UnitName("player")
-    -- class, role = unpack(nameRoleRoster[name])
-  end
-
-  self:Print("Done getting raid health")
-  return health, maxHealth
+  return health, currentMaxHealth, totalMaxHealth
 end
 
 -- Event Handlers
 function GroupBarAddon:RosterUpdateHandler()
   self:Print("roster updated")
   self:BuildRaidRoster()
-  if basicUi == nil then basicUi = self:CreateBasicUI() end
+  self:DisplayBarUI()
 end
 
 function GroupBarAddon:GroupLeftHandler()
   self:Print("group left")
   if healthTimer ~= nil then self:CancelTimer(healthTimer) end
-  basicUi:Release()
-  basicUi = nil
+  self:HideBarUI()
 end
 
 function GroupBarAddon:HealthTimerHandler()
-  self:Print("Starting health timer logic...")
-  health, maxHealth = GroupBarAddon:UpdateRaidHealth()
-  basicUi:SetStatusText(health.."/"..maxHealth)
-  self:Print("Raid Health at "..health.."/"..maxHealth)
+  health, currentMaxHealth, totalMaxHealth = GroupBarAddon:UpdateRaidHealth()
+  self:UpdateBarUI(health, currentMaxHealth, totalMaxHealth)
+end
+
+-- UI
+function GroupBarAddon:SpawnBarUI()
+  local maxBar = CreateFrame("StatusBar",nil,UIParent)
+  maxBar:SetFrameStrata("BACKGROUND")
+  maxBar:SetWidth(400)
+  maxBar:SetHeight(30)
+  maxBar:SetPoint("CENTER", UIParent, "CENTER", 0, 100)
+  maxBar:SetStatusBarTexture("Interface\\TARGETINGFRAME\\UI-StatusBar")
+  maxBar:GetStatusBarTexture():SetHorizTile(false)
+  maxBar:GetStatusBarTexture():SetVertTile(false)
+  maxBar:SetStatusBarColor(0.65, 0, 0)
+
+  maxBar.bg = maxBar:CreateTexture(nil, "BACKGROUND", nil, 3)
+  maxBar.bg:SetTexture("Interface\\TARGETINGFRAME\\UI-StatusBar")
+  maxBar.bg:SetAllPoints(true)
+  maxBar.bg:SetVertexColor(0.15, 0.15, 0.15)
+
+  local currBar = CreateFrame("StatusBar",nil,maxBar)
+  currBar:SetFrameStrata("BACKGROUND")
+  currBar:SetStatusBarTexture("Interface\\TARGETINGFRAME\\UI-StatusBar")
+  currBar:GetStatusBarTexture():SetHorizTile(false)
+  currBar:GetStatusBarTexture():SetVertTile(false)
+  currBar:SetAllPoints(true)
+  currBar:SetStatusBarColor(0, 0.65, 0)
+
+  local barOverlay = currBar:CreateFontString(nil, "OVERLAY")
+  barOverlay:SetPoint("CENTER", currBar, "CENTER", 4, 0)
+  barOverlay:SetFont("Fonts\\FRIZQT__.TTF", 12, "THICKOUTLINE")
+  barOverlay:SetJustifyH("left")
+  barOverlay:SetShadowOffset(1, -1)
+  barOverlay:SetTextColor(0.2, 0.2, 1)
+
+  maxBar:SetMinMaxValues(0, 100)
+  maxBar:SetValue(100)
+  currBar:SetMinMaxValues(0, 100)
+  currBar:SetValue(100)
+  barOverlay:SetText("1/1 (-0%)")
+
+  maxBar:EnableMouse(true)
+	maxBar:SetMovable(true)
+  maxBar:SetToplevel(true)
+
+  maxBar:SetScript("OnMouseDown", function(f) f:StartMoving() end)
+  maxBar:SetScript("OnMouseUp", function(f) f:StopMovingOrSizing() end)
+
+  uiEnabled = true
+  return {
+    current = currBar,
+    max = maxBar,
+    overlay = barOverlay,
+    totalMax = 1,
+  }
+end
+
+local healthBarUi = nil
+function GroupBarAddon:GetBarUi() return healthBarUi end
+
+function GroupBarAddon:DisplayBarUI()
+  if healthBarUi == nil then healthBarUi = GroupBarAddon:SpawnBarUI() end
+  healthBarUi.max:Show()
+end
+
+function GroupBarAddon:HideBarUI()
+  healthBarUi.max:Hide()
+end
+
+function GroupBarAddon:UpdateBarUI(health, currentMaxHealth, totalMaxHealth)
+  if totalMaxHealth ~= healthBarUi.totalMax
+  then
+    healthBarUi.current:SetMinMaxValues(0, totalMaxHealth)
+    healthBarUi.max:SetMinMaxValues(0, totalMaxHealth)
+    healthBarUi.totalMax = totalMaxHealth
+  end
+  healthBarUi.max:SetValue(currentMaxHealth)
+  healthBarUi.current:SetValue(health)
+  healthBarUi.overlay:SetText(self:GetOverlayText(health, currentMaxHealth, totalMaxHealth))
+end
+
+function GroupBarAddon:GetOverlayText(health, currentMaxHealth, totalMaxHealth)
+  healthDefecit = currentMaxHealth - totalMaxHealth
+  return health.."/"..currentMaxHealth.." ("..healthDefecit..")"
 end
 
 --[[
@@ -152,6 +234,8 @@ Note:
 Get Player group role:
   GetSpecializationRoleByID(GetPrimarySpecialization())
 ]]
+
+
 
 -- Really, really basic UI
 function GroupBarAddon:CreateBasicUI()
@@ -183,7 +267,7 @@ function GroupBarAddon:CreateReloadButton()
       frame:SetTitle("Reload")
 
       frame:SetWidth(260)
-      frame:SetHeight(300)
+      frame:SetHeight(340)
 
       local btn = AceGUI:Create("Button")
       btn:SetWidth(120)
@@ -213,6 +297,16 @@ function GroupBarAddon:CreateReloadButton()
       btn:SetCallback("OnClick", function() self:CancelAllTimers() end)
       frame:AddChild(btn)
 
+      btn = AceGUI:Create("Button")
+      btn:SetWidth(120)
+      btn:SetHeight(20)
+      btn:SetText("Build Roster")
+      btn:SetCallback("OnClick", function() GroupBarAddon:BuildRaidRoster() end)
+      frame:AddChild(btn)
+
+
+      -- ---------------------------------------------------------------------
+
       txt = AceGUI:Create("EditBox")
       txt:SetWidth(180)
       txt:SetHeight(30)
@@ -239,6 +333,20 @@ function GroupBarAddon:CreateReloadButton()
       btn:SetText("UnitHealth(*)")
       btn:SetCallback("OnClick", function() print(UnitHealth(txt:GetText())) end)
       frame:AddChild(btn)
+
+      btn = AceGUI:Create("Button")
+      btn:SetWidth(180)
+      btn:SetHeight(20)
+      btn:SetText("Mock Raid Roster")
+      btn:SetCallback("OnClick", function() self:Debug_MockRaidRoster(); self:DisplayBarUI() end)
+      frame:AddChild(btn)
+
+      btn = AceGUI:Create("Button")
+      btn:SetWidth(180)
+      btn:SetHeight(20)
+      btn:SetText("Mock Leave Group")
+      btn:SetCallback("OnClick", function() self:GroupLeftHandler() end)
+      frame:AddChild(btn)
     end
 end
 
@@ -251,4 +359,42 @@ function GroupBarAddon:Debug_PartyInviteHandler(event, name)
     AcceptGroup()
     StaticPopup_Hide("PARTY_INVITE")
   end
+end
+
+local dbg_rosterData = nil
+
+function GroupBarAddon:Debug_MockRaidRoster()
+  self:Print("Mocking the raid roster...")
+  table.insert(GroupBarRoster, {"Pawn1", "Warrior", "TANK", "raid1"})
+  table.insert(GroupBarRoster, {"Pawn2", "Monk", "HEALER", "raid2"})
+  table.insert(GroupBarRoster, {"Pawn3", "Druid", "DAMAGER", "raid3"})
+  table.insert(GroupBarRoster, {"Pawn4", "Paladin", "DAMAGER", "raid4"})
+  table.insert(GroupBarRoster, {"Pawn5", "Rogue", "DAMAGER", "raid5"})
+  table.insert(GroupBarRoster, {"Pawn6", "Warlock", "DAMAGER", "raid6"})
+  table.insert(GroupBarRoster, {"Pawn7", "Warrior", "DAMAGER", "raid7"})
+  table.insert(GroupBarRoster, {"Pawn8", "Mage", "DAMAGER", "raid8"})
+  table.insert(GroupBarRoster, {"Pawn9", "Hunter", "DAMAGER", "raid9"})
+
+  local baseHealth, maxHealth = 100, 125
+  dbg_rosterData = {}
+  for k, member in pairs(GroupBarRoster)
+  do
+    local name, class, role, unitId = unpack(member)
+
+    dbg_rosterData[unitId] = {baseHealth, maxHealth, false}
+
+    baseHealth, maxHealth = baseHealth + 10, maxHealth + 125
+  end
+
+  -- kill two of the raiders
+  dbg_rosterData["raid4"][3] = true
+  dbg_rosterData["raid4"][5] = true
+
+  -- debug function hooks for UpdateRaidHealth()
+  gb_UnitHealth = function(unitId) return dbg_rosterData[unitId][1] end
+  gb_UnitHealthMax = function(unitId) return dbg_rosterData[unitId][2] end
+  gb_UnitIsDead = function(unitId) return dbg_rosterData[unitId][3] end
+  -- end debug function hooks for UpdateRaidHealth()
+
+  if healthTimer == nil then healthTimer = self:ScheduleRepeatingTimer("HealthTimerHandler", 0.2) end
 end
